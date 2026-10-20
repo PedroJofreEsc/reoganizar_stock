@@ -1,0 +1,35 @@
+PENDIENTES - Reorganización de stock SAP B1
+=============================================
+Registro de cambios, mejoras y bugs por revisar.
+Formato: [estado] #N - título / fecha de registro / detalle
+Estados: [ ] pendiente   [~] en curso   [x] hecho   [-] descartado
+
+
+CAMBIOS / MEJORAS
+-----------------
+
+[ ] #1 - Devolver los documentos generados en SAP
+    Registrado: 2026-10-20
+    Mostrar y entregar los documentos que la app crea en SAP (traslados, SM y EM), con su
+    DocEntry / DocNum, por carga.
+    Por definir:
+      - Formato: tabla en la app, archivo descargable (Excel/CSV) o ambos.
+      - Alcance: solo la última ejecución, la carga completa o un rango de fechas.
+      - Datos adicionales: fecha, bodega, artículos, cantidades, asiento, usuario.
+
+[ ] #2 - Apartado para crear EM directamente en SAP
+    Registrado: 2026-10-20
+    Nueva sección para crear Entradas de Mercancía sin pasar por el flujo SM -> EM de la
+    transformación.
+    Por definir:
+      - Excel de carga: columnas (artículo, bodega, lote, vencimiento, cantidad, bin, costo,
+        cuenta, dimensiones).
+      - Costo unitario: lo informa el usuario o se toma de SAP (último costo / precio promedio).
+      - Si reutiliza el esquema de cargas (ID propio, JSON, reenvío, logs) como los demás procesos.
+      - Aviso de vencimiento < 90 días y de lote existente, igual que en la transformación.
+
+
+BUGS
+----
+
+(sin bugs registrados)
