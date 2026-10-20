@@ -1,0 +1,15 @@
+# Datos locales de ejecución: cargas, logs CSV, JSON enviados a SAP y copias de los Excel subidos
+salidas/
+
+# Configuración local (copiar desde config.ini.example)
+config.ini
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Temporales
+*.tmp
+~$*.xlsx

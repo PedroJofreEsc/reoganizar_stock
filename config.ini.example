@@ -1,0 +1,14 @@
+; Opcional: copiar como config.ini para cambiar los valores por defecto.
+; Usuario y clave NO van aquí: se ingresan en la app y solo se usan para el login.
+; Las bases por empresa (test / productiva) están en reorg/config.py (EMPRESAS).
+[service_layer]
+url = https://cl-cloud-sl1.sapparapymes.cloud:50000/b1s/v1/
+; verificar el certificado HTTPS del servidor. Desactivar solo si falla por certificado autofirmado.
+verify_ssl = true
+
+[proceso]
+; máximo de artículos (líneas) por documento de traslado de stock
+max_articulos_traslado = 20
+; días mínimos de vencimiento que exige SAP para lotes nuevos. La app solo AVISA si un lote
+; destino vence antes (si la fecha es real, pedir autorización temporal en SAP). 0 = no avisar
+dias_minimos_vencimiento = 90
