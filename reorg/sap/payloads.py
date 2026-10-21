@@ -69,7 +69,7 @@ def salida_mercancia(t: Transformacion) -> dict:
                               for lt in t.lotes_origen],
              "DocumentLinesBinAllocations": [_alloc(a, 0, idx) for a in t.salidas_sm]}
     origen = ", ".join(lt.lote for lt in t.lotes_origen)
-    return {"Comments": f"SM transformacion lote {origen} art {t.articulo}"[:254],
+    return {"Comments": (t.comentario or f"SM transformacion lote {origen} art {t.articulo}")[:254],
             "DocumentLines": [linea]}
 
 
@@ -81,5 +81,5 @@ def entrada_mercancia(t: Transformacion, sm_doc_entry: int, sm_doc_num, costo_un
              "BatchNumbers": [{"BatchNumber": lt.lote, "Quantity": num(lt.cantidad),
                                "BaseLineNumber": 0, "ExpiryDate": lt.vencimiento} for lt in t.lotes_destino],
              "DocumentLinesBinAllocations": [_alloc(a, 0, idx) for a in t.entradas_em]}
-    return {"Comments": f"EM desde SM {sm_doc_num}, lotes reales art {t.articulo}"[:254],
+    return {"Comments": (t.comentario or f"EM desde SM {sm_doc_num}, lotes reales art {t.articulo}")[:254],
             "DocumentLines": [linea]}

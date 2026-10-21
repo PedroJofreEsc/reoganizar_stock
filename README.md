@@ -35,6 +35,8 @@ streamlit run app.py          # o doble clic en iniciar_app.bat → http://local
 
 Las bases se configuran en `reorg/config.py` (`EMPRESAS`). `config.ini`, opcional (copiar de `config.ini.example`), define la URL del Service Layer, `verify_ssl` (verificar el certificado HTTPS; desactivar solo si falla por certificado autofirmado) y `max_articulos_traslado`.
 
+**Sesión expirada.** La sesión del Service Layer expira tras un tiempo sin actividad (por defecto 30 minutos); cada consulta reinicia ese contador. Si alguna consulta recibe "sesión expirada", la app **desconecta y vuelve a mostrar el formulario de conexión**, con la empresa y el tipo de base preseleccionados, y un aviso. La carga seleccionada y el último resultado se conservan. Un envío cortado por sesión expirada no crea el documento: queda en `ERROR`, y lo que no alcanzó a enviarse queda en `NO_EJECUTADO`, todo reenviable desde la carga al reconectar.
+
 ## Cargas
 
 Cada ejecución es una **carga con ID propio**: `TR-AAAAMMDD-HHMMSS` en traslados y `TF-AAAAMMDD-HHMMSS` en transformaciones. Nace al presionar **Ejecutar** o **Crear SM**; validar no crea carga. **El nombre del Excel no se usa para nada**: subir el mismo archivo, un archivo editado o uno con otro nombre siempre crea una carga nueva.
@@ -47,11 +49,17 @@ salidas/<CompanyDB>/cargas/<ID>/
 └── log_<etapa>_<fecha>.csv
 ```
 
-Cada pestaña tiene una sección **Cargas**. Por defecto lista las cargas de la base con pendientes; con *Mostrar también cargas terminadas* aparecen todas. Desde ahí se reenvían los fallidos y se hace la etapa EM, **sin volver a subir el Excel**.
+El resultado de cada ejecución se muestra **debajo del Excel subido** (Nueva carga), con los DocNum creados. Cada pestaña tiene además una sección **Cargas**. Por defecto lista las cargas de la base con pendientes, más la carga con la que se está trabajando aunque haya quedado terminada; con *Mostrar también cargas terminadas* aparecen todas. El resultado de un reenvío, de crear EM o de un cierre se muestra en esa sección. Desde ahí se reenvían los fallidos y se hace la etapa EM, **sin volver a subir el Excel**.
 
 > Para el usuario: si un envío falla, corrígelo desde la carga con **Reenviar**. Volver a subir el Excel crea una carga nueva y crearía otra vez los documentos que ya quedaron OK.
 
 **Aviso de duplicados (no bloquea).** Al validar, la app compara el contenido con **todas las cargas guardadas de la base**, de cualquier fecha, terminadas o no. Avisa si un traslado es idéntico a uno ya creado, si una transformación es idéntica a una ya hecha, o si el artículo tiene una EM pendiente en otra carga. Solo conoce lo hecho con esta app en esta carpeta, no documentos creados directamente en SAP.
+
+## Documentos creados
+
+La pestaña **Documentos creados** lista todos los documentos que la app creó en la base conectada, de todas las cargas: traslados, SM y EM. Muestra **fecha, tipo de documento, DocNum y DocEntry**, además de la carga, la bodega, los artículos, la cantidad, la referencia (lotes de origen de la SM, o la SM de la que viene la EM) y el usuario. Se puede filtrar por tipo, carga y rango de fechas, y descargar en Excel o CSV.
+
+La fecha es la del documento en SAP (`DocDate`, que se guarda desde la versión 1.1). En documentos anteriores se usa la fecha en que la app los envió. Solo aparecen documentos creados con cargas: los traslados de las pruebas previas a las cargas no se listan.
 
 ## Envíos y JSON
 
@@ -63,14 +71,21 @@ Cada documento se **guarda primero como JSON** en `payloads/` de la carga y se e
 | ERROR | SAP lo rechazó: no se creó | Sí |
 | NO_EJECUTADO | No se envió (la sesión expiró antes) | Sí |
 | REVISAR | Sin respuesta (timeout, corte, o la app se cerró durante el envío): no se sabe si se creó | Solo marcando "revisé en SAP y no se creó" |
+| CERRADO | El usuario lo cerró sin crearlo: deja de estar pendiente | No |
+
+**Cerrar documentos que no se crearon.** En la sección **Cargas**, el bloque *Cerrar documentos que no se crearon* permite cerrar traslados, SM o EM que no estén OK, para que no queden esperando un reenvío. Hay que indicar un **motivo**, que es obligatorio, y confirmar. Se registra quién, cuándo, el motivo y el estado previo (columna `CIERRE` y `log_cierre_<fecha>.csv` en la carga). La carga pasa a *terminada* cuando no le quedan pendientes.
+- **EM con su SM creada:** al cerrarla, la mercadería de esa SM queda fuera de stock y debe resolverse directamente en SAP. La app lo advierte con el número de SM.
+- **REVISAR:** podría haberse creado en SAP sin que la app lo sepa. Conviene revisarlo antes de cerrarlo.
 
 `carga.json` se guarda con reintentos, porque OneDrive puede bloquear el archivo por un instante mientras lo sincroniza.
 
 ## Excel de traslado (pasos 1 y 3), primera hoja
 
-Una fila = un movimiento: `ARTICULO | BODEGA | BIN_ORIGEN | BIN_DESTINO | CANTIDAD | LOTE`
+Una fila = un movimiento: `ARTICULO | BODEGA | BIN_ORIGEN | BIN_DESTINO | CANTIDAD | LOTE | COMENTARIO`
 
-- Se arma **un traslado por bodega cada 20 artículos** como máximo. Cada artículo es una línea y todas sus filas van al mismo documento.
+- **`COMENTARIO` (opcional)** va en los **Comentarios** del documento en SAP (`Comments`, máximo 254 caracteres). Como es un dato de cabecera, los documentos se arman por **bodega + comentario**: las filas con distinto comentario quedan en documentos distintos, aunque sean del mismo artículo. Si la celda está vacía, se usa el *Comentario por defecto* de la app; si también está vacío, uno automático (`Traslado ubicaciones <bodega> doc N`). Un Excel sin la columna sigue funcionando.
+
+- Se arma **un traslado por bodega y comentario, cada 20 artículos** como máximo. Cada artículo es una línea y todas sus filas van al mismo documento.
 - En cada artículo, los lotes se suman y se **ordenan por cantidad descendente**. Las asignaciones `BinActionType 2` (sale) y `1` (entra) se agrupan por lote + bin.
 - Se omiten las filas con origen = destino, y se avisa.
 - Paso 1: el Excel debe calzar exactamente con el saldo **en SAP** por lote y bin (no con el físico); si no, SAP rechaza el documento.
@@ -78,7 +93,9 @@ Una fila = un movimiento: `ARTICULO | BODEGA | BIN_ORIGEN | BIN_DESTINO | CANTID
 
 ## Excel de transformación (paso 2), primera hoja
 
-Una fila = un movimiento de lote: `ARTICULO | BODEGA | LOTE_ORIGEN | LOTE_DESTINO | VENCIMIENTO | CANTIDAD | BIN_ORIGEN | CUENTA | DIM1..DIM5`
+Una fila = un movimiento de lote: `ARTICULO | BODEGA | LOTE_ORIGEN | LOTE_DESTINO | VENCIMIENTO | CANTIDAD | BIN_ORIGEN | CUENTA | DIM1..DIM5 | COMENTARIO`
+
+- **`COMENTARIO` (opcional)** se envía en los **Comentarios de la SM y de la EM** del artículo. Debe ser igual en todas las filas del artículo, porque cada artículo genera una sola SM y una sola EM; máximo 254 caracteres. Si está vacío, se usan los comentarios automáticos (*"SM transformacion lote … art …"* / *"EM desde SM …"*). No cuenta para el aviso de duplicados.
 
 - **Una SM y una EM por artículo, de una línea cada una.**
 - SM: salen los `LOTE_ORIGEN` desde `BIN_ORIGEN`. **Puede haber varios lotes de origen por artículo.**
@@ -151,3 +168,9 @@ Los CSV usan `;` y UTF-8 con BOM, así que se abren directo en Excel.
 - 2026-10-06: v4. Conexión por empresa + tipo de base, con aviso en rojo para productiva. SSL y URL quedan solo en `config.ini`. Cada documento se guarda como JSON y se envía ese archivo; el log registra su nombre. Reenvío de fallidos en traslados y aviso de duplicados por estado. Paso 2 con `LOTE_ORIGEN`/`LOTE_DESTINO` (varios orígenes, costo promedio), aviso si el lote destino ya existe, y dos etapas (SM, luego EM seleccionadas o todas) con registro JSON. Probado con un SAP simulado.
 - 2026-10-07: v5. Cargas con ID propio (`TR-…`, `TF-…`): ya no se usa el nombre del Excel. Cada carga guarda su estado, una copia del Excel, los JSON y los logs. Sección **Cargas** para reenviar y hacer la etapa EM sin el Excel. Aviso de duplicados por contenido contra todas las cargas de la base. Guardado con reintentos ante bloqueos de OneDrive. Los registros de las pruebas anteriores en `CLTST1ADCLEAN` no se migran: la app no los lee.
 - 2026-10-07: v6. Aviso (no bloqueo) de lotes destino que vencen a menos de 90 días, al validar y en la etapa EM. Corrección del nombre y el vencimiento de los lotes destino de EM pendientes, con JSON nuevo y el anterior conservado.
+- 2026-10-20: **versión 1.1**. Pestaña **Documentos creados** (fecha, tipo, DocNum y DocEntry, con filtros y descarga). Se guarda el `DocDate` que devuelve SAP.
+- 2026-10-20: columna opcional `COMENTARIO` en el Excel de traslado, que se envía en los Comentarios del documento (documentos por bodega + comentario). Se registra en la carga, el log y la columna Referencia de Documentos creados.
+- 2026-10-20: cerrar documentos que no se crearon (traslados, SM y EM): estado `CERRADO`, con motivo obligatorio y registro de quién y cuándo; dejan de quedar pendientes y la carga puede quedar terminada.
+- 2026-10-21: si cualquier consulta a SAP detecta la sesión expirada (incluso atrapada internamente, como al calcular un costo), la app desconecta y vuelve a habilitar la conexión en la barra lateral, conservando la empresa/tipo de base, la carga seleccionada y el último resultado.
+- 2026-10-21: corrección: el resultado de una ejecución vuelve a mostrarse bajo el Excel subido, y la carga en uso sigue visible en **Cargas** aunque quede terminada (antes desaparecía junto con su resultado).
+- 2026-10-21: columna opcional `COMENTARIO` en el Excel de cambio de lote, enviada en los Comentarios de la SM y de la EM (igual en todas las filas del artículo).

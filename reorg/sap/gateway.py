@@ -28,6 +28,12 @@ class SapGateway:
         self.carpeta = carpeta_payloads
         self._bins: dict[str, dict[str, int]] = {}
 
+    @property
+    def sesion_expirada(self) -> bool:
+        """True si alguna consulta de este gateway recibió 'sesión expirada' (aunque el error se haya
+        atrapado más arriba, p. ej. al calcular un costo)."""
+        return self.sl.expirada
+
     # ---- lectura ---------------------------------------------------------- #
     def resolver_bin(self, bodega: str, bin_code: str) -> int:
         """BinCode -> AbsEntry (cache por bodega). ValueError si no existe."""
@@ -91,4 +97,4 @@ class SapGateway:
 
     def enviar(self, tipo: str, archivo: str) -> DocCreado:
         r = self.sl.post(ENDPOINTS[tipo], self.leer_json(archivo))
-        return DocCreado(r["DocEntry"], r["DocNum"], r.get("TransNum") or None)
+        return DocCreado(r["DocEntry"], r["DocNum"], r.get("TransNum") or None, (r.get("DocDate") or "")[:10])

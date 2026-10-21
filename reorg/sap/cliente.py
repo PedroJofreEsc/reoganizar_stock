@@ -63,6 +63,7 @@ class SLClient:
     def __init__(self, sesion: Sesion, timeout: int = 120):
         self.base = _base(sesion.base_url)
         self.timeout = timeout
+        self.expirada = False  # queda en True si alguna consulta recibió 401
         self.s = requests.Session()
         self.s.verify = sesion.verify
         self.s.headers.update({
@@ -72,6 +73,7 @@ class SLClient:
 
     def _revisar(self, r: requests.Response, verbo: str, path: str):
         if r.status_code == 401:
+            self.expirada = True
             raise SesionExpirada("La sesión de SAP expiró o no es válida. Vuelve a conectar.")
         if r.status_code not in (200, 201, 204):
             raise ErrorSAP(f"{verbo} {path}: {_mensaje(r)}")

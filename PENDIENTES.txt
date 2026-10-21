@@ -8,14 +8,38 @@ Estados: [ ] pendiente   [~] en curso   [x] hecho   [-] descartado
 CAMBIOS / MEJORAS
 -----------------
 
-[ ] #1 - Devolver los documentos generados en SAP
-    Registrado: 2026-10-20
-    Mostrar y entregar los documentos que la app crea en SAP (traslados, SM y EM), con su
-    DocEntry / DocNum, por carga.
-    Por definir:
-      - Formato: tabla en la app, archivo descargable (Excel/CSV) o ambos.
-      - Alcance: solo la última ejecución, la carga completa o un rango de fechas.
-      - Datos adicionales: fecha, bodega, artículos, cantidades, asiento, usuario.
+[x] #1 - Devolver los documentos generados en SAP                      (versión 1.1)
+    Registrado: 2026-10-20 / Hecho: 2026-10-20
+    Pestaña "Documentos creados": tabla con fecha, tipo de documento, DocNum y DocEntry de
+    todos los traslados, SM y EM creados (más carga, bodega, artículos, cantidad, referencia
+    y usuario). Filtros por tipo, carga y fechas; descarga en Excel y CSV.
+    La fecha es la del documento en SAP (DocDate); en documentos anteriores a la 1.1 se usa
+    la fecha de envío.
+
+[x] #3 - Comentario en la plantilla de traslado
+    Registrado: 2026-10-20 / Hecho: 2026-10-20
+    Columna opcional COMENTARIO en el Excel de traslado (pasos 1 y 3), enviada en Comments
+    del documento. Documentos por bodega + comentario; máximo 254 caracteres. Si viene vacío
+    se usa el comentario por defecto de la app o uno automático.
+
+[x] #4 - Cerrar documentos que no se lograron subir
+    Registrado: 2026-10-20 / Hecho: 2026-10-20
+    En cada carga, bloque "Cerrar documentos que no se crearon" (traslados, SM y EM no OK).
+    Estado CERRADO, motivo obligatorio, registro de quién/cuándo/estado previo y log de cierre.
+    Aviso al cerrar una EM con SM creada (stock fuera, resolver en SAP) y al cerrar REVISAR.
+    Pendiente a futuro (si se necesita): opción de reabrir un documento cerrado.
+
+[x] #5 - Reconectar cuando la sesión de SAP expira
+    Registrado: 2026-10-21 / Hecho: 2026-10-21
+    Si cualquier consulta recibe 401 (sesión expirada), la app desconecta y vuelve a mostrar el
+    formulario de conexión con empresa/tipo preseleccionados; conserva carga y resultado.
+    Ideas no tomadas (por si se necesitan): mostrar hora estimada de expiración (SessionTimeout),
+    botón "Mantener sesión", reconexión automática (requeriría guardar la clave en memoria).
+
+[x] #6 - Comentario en el Excel de cambio de lote
+    Registrado: 2026-10-21 / Hecho: 2026-10-21
+    Columna opcional COMENTARIO en 2_transformacion_lotes, enviada en Comments de la SM y de la
+    EM. Igual en todas las filas del artículo, máx. 254; vacío = comentario automático.
 
 [ ] #2 - Apartado para crear EM directamente en SAP
     Registrado: 2026-10-20

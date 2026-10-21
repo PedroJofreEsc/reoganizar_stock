@@ -16,13 +16,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from reorg.dominio import REENVIABLES, ErrorSAP, ErrorValidacion, Estado, Gateway, Transformacion, ordenar_lotes
+from reorg.dominio import FINALES, REENVIABLES, ErrorSAP, ErrorValidacion, Estado, Gateway, Transformacion, ordenar_lotes
 from reorg.procesos import costo, excel, registro
 from reorg.procesos.comun import asignaciones, enviar, resolver_bins
 from reorg.procesos.registro import CargaTransformacion
 
 COLUMNAS = ["ARTICULO", "BODEGA", "LOTE_ORIGEN", "LOTE_DESTINO", "VENCIMIENTO", "CANTIDAD", "BIN_ORIGEN", "CUENTA"]
 DIMS = ["DIM1", "DIM2", "DIM3", "DIM4", "DIM5"]
+OPCIONALES = ["COMENTARIO"]  # va en Comments de la SM y de la EM; igual en todas las filas del artículo
+MAX_COMENTARIO = 254
 
 Progreso = Callable[[int, int, dict], None] | None
 
@@ -38,8 +40,10 @@ class PlanTransformacion:
 # --------------------------------------------------------------------------- #
 def preparar(origen, gateway: Gateway, company_db: str | None = None,
              dias_minimos: int = 90) -> PlanTransformacion:
-    filas = excel.leer_filas(origen, COLUMNAS, DIMS)
+    filas = excel.leer_filas(origen, COLUMNAS, DIMS + OPCIONALES)
     errores = excel.obligatorias(filas, ["ARTICULO", "BODEGA", "LOTE_ORIGEN", "LOTE_DESTINO", "BIN_ORIGEN", "CUENTA"])
+    errores += [f"Fila {f['FILA']}: COMENTARIO tiene {len(f['COMENTARIO'])} caracteres (máximo {MAX_COMENTARIO})"
+                for f in filas if len(f["COMENTARIO"]) > MAX_COMENTARIO]
     for f in filas:
         try:
             f["VENCIMIENTO"] = excel.fecha(f["VENCIMIENTO"])
@@ -82,6 +86,7 @@ def _unico(filas: list[dict], col: str) -> str:
 def _transformacion(articulo: str, bodega: str, filas: list[dict]) -> Transformacion:
     cuenta = _unico(filas, "CUENTA")
     dims = [_unico(filas, d) for d in DIMS]
+    comentario = _unico(filas, "COMENTARIO")
     origen = ordenar_lotes({l: q for (l,), q in excel.sumar(filas, "LOTE_ORIGEN").items()})
     destino = ordenar_lotes({l: q for (l,), q in excel.sumar(filas, "LOTE_DESTINO").items()})
     cruzados = {l.lote.upper() for l in origen} & {l.lote.upper() for l in destino}
@@ -95,7 +100,8 @@ def _transformacion(articulo: str, bodega: str, filas: list[dict]) -> Transforma
     return Transformacion(
         articulo, bodega, sum(f["CANTIDAD"] for f in filas), cuenta, dims, origen, destino,
         salidas_sm=asignaciones(filas, "BIN_ORIGEN", {l.lote: i for i, l in enumerate(origen)}, "LOTE_ORIGEN"),
-        entradas_em=asignaciones(filas, "BIN_ORIGEN", {l.lote: i for i, l in enumerate(destino)}, "LOTE_DESTINO"))
+        entradas_em=asignaciones(filas, "BIN_ORIGEN", {l.lote: i for i, l in enumerate(destino)}, "LOTE_DESTINO"),
+        comentario=comentario)
 
 
 def _avisar_lotes_existentes(t: Transformacion, gateway: Gateway, ctx: str) -> list[str]:
@@ -133,12 +139,12 @@ def avisar_duplicados(plan: PlanTransformacion, company_db: str):
     transformación idéntica ya hecha, o artículo con EM pendiente en otra carga."""
     previas = registro.transformaciones_registradas(company_db)
     for t in plan.items:
-        h = registro.huella(t.to_dict())
+        h = registro.huella_transformacion(t.to_dict())
         for carga_id, clave, e in previas:
             if e["huella"] == h:
                 plan.avisos.append(f"{t.bodega} / {t.articulo}: transformación idéntica a la de la carga {carga_id} "
                                    f"(SM {e['sm']['doc_num']}). Ejecutarla crea otra SM.")
-            elif clave == t.clave and e["em"]["estado"] != Estado.OK.value:
+            elif clave == t.clave and e["em"]["estado"] not in FINALES:
                 plan.avisos.append(f"{t.bodega} / {t.articulo}: tiene la SM {e['sm']['doc_num']} con EM pendiente "
                                    f"en la carga {carga_id}.")
 
@@ -184,7 +190,7 @@ def _enviar_sm(carga: CargaTransformacion, claves: list[str], gateway: Gateway, 
             estado, r, error, detenido = enviar(gateway, "sm", sm["payload"])
             sm.update(estado=estado, error=error)
             if r:
-                sm.update(doc_entry=r.doc_entry, doc_num=r.doc_num, trans_num=r.trans_num)
+                sm.update(doc_entry=r.doc_entry, doc_num=r.doc_num, trans_num=r.trans_num, doc_date=r.doc_date)
                 carga.guardar()
                 calcular_costo(e, gateway)
             fila = carga.fila_log(clave, "SM")
@@ -279,7 +285,7 @@ def corregir_em(carga: CargaTransformacion, clave: str, cambios: dict[str, tuple
     for l in destino:
         if l["lote"] in nuevos:
             l["lote"], l["vencimiento"] = nuevos[l["lote"]]
-    e["huella"] = registro.huella(d)
+    e["huella"] = registro.huella_transformacion(d)
     if em["payload"]:
         em.setdefault("payloads_anteriores", []).append(em["payload"])
         em["payload"] = ""  # el próximo envío arma un JSON nuevo
@@ -324,10 +330,33 @@ def crear_em(carga: CargaTransformacion, gateway: Gateway, claves: list[str],
             estado, r, error, detenido = enviar(gateway, "em", em["payload"])
             em.update(estado=estado, error=error)
             if r:
-                em.update(doc_entry=r.doc_entry, doc_num=r.doc_num)
+                em.update(doc_entry=r.doc_entry, doc_num=r.doc_num, doc_date=r.doc_date)
             fila = carga.fila_log(clave, "EM")
         carga.guardar()
         log.append(fila)
         if on_progreso:
             on_progreso(i, len(claves), fila)
     return log
+
+
+# --------------------------------------------------------------------------- #
+# Cerrar SM o EM que no se crearon (dejan de quedar pendientes)
+# --------------------------------------------------------------------------- #
+def cerrables(carga: CargaTransformacion) -> list[tuple[str, str]]:
+    """[(clave, "SM"|"EM")] de los documentos pendientes que se pueden cerrar."""
+    return [(k, "SM") for k, _ in carga.sm_pendientes()] + [(k, "EM") for k, _ in carga.em_pendientes()]
+
+
+def cerrar(carga: CargaTransformacion, documentos: list[tuple[str, str]], usuario: str, motivo: str) -> list[dict]:
+    """Cierra SM o EM no creadas. Cerrar una EM con su SM creada deja esa mercadería fuera de stock:
+    se debe resolver en SAP. Devuelve las filas para el log."""
+    if not motivo.strip():
+        raise ValueError("indica el motivo del cierre")
+    validos = set(cerrables(carga))
+    filas = []
+    for clave, etapa in documentos:
+        if (clave, etapa) in validos:
+            registro.cerrar_documento(carga.get(clave)[etapa.lower()], usuario, motivo)
+            filas.append(carga.fila_log(clave, etapa))
+    carga.guardar()
+    return filas

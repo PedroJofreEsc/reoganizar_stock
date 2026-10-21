@@ -19,7 +19,7 @@ import streamlit as st
 from reorg import plantillas
 from reorg.config import EMPRESAS, PRODUCTIVA, TEST, leer_config
 from reorg.dominio import ErrorSAP, ErrorValidacion, Estado, SesionExpirada
-from reorg.procesos import transformacion, traslado
+from reorg.procesos import registro, transformacion, traslado
 from reorg.procesos.registro import CargaTransformacion, CargaTraslado
 from reorg.sap import cliente, payloads
 from reorg.sap.gateway import SapGateway
@@ -28,15 +28,42 @@ st.set_page_config(page_title="Reorganización de stock SAP", page_icon="📦", 
 CFG = leer_config()
 ss = st.session_state
 ss.setdefault("n_ejecuciones", 0)  # cambia la key de casillas y tablas tras cada ejecución
-ESTADO_APP = ["sesion", "plan_traslado", "res_traslado", "plan_transf", "res_transf", "sel_tr", "sel_tf"]
+ESTADO_APP = ["sesion", "plan_traslado", "res_traslado", "res_nueva_tr", "plan_transf", "res_transf", "res_nueva_tf",
+              "sel_tr", "sel_tf"]
 
 
 # --------------------------------------------------------------------------- #
 # Utilidades
 # --------------------------------------------------------------------------- #
+_GATEWAYS: list[SapGateway] = []  # gateways usados en esta ejecución del script (se reinicia en cada rerun)
+
+AVISO_EXPIRADA = ("La sesión de SAP expiró o se desconectó. Vuelve a conectar en la barra lateral: lo que no "
+                  "alcanzó a enviarse quedó pendiente en la carga y se puede reenviar.")
+
+
 def gateway(carpeta=None) -> SapGateway:
     """Sin carpeta solo sirve para validar (lecturas); para enviar, la carpeta payloads/ de la carga."""
-    return SapGateway(ss.sesion, carpeta)
+    gw = SapGateway(ss.sesion, carpeta)
+    _GATEWAYS.append(gw)
+    return gw
+
+
+def expirar_sesion(mensaje: str = AVISO_EXPIRADA):
+    """Quita la sesión para que la barra lateral vuelva a pedir la conexión. Conserva la carga
+    seleccionada y el último resultado, para seguir en el mismo punto al reconectar."""
+    ss.pop("sesion", None)
+    ss.aviso_sesion = mensaje
+
+
+def revisar_sesion():
+    if ss.get("sesion") and any(gw.sesion_expirada for gw in _GATEWAYS):
+        expirar_sesion()
+
+
+def recargar():
+    """st.rerun() revisando antes si alguna consulta detectó la sesión expirada."""
+    revisar_sesion()
+    st.rerun()
 
 
 def huella_archivo(archivo, *extra) -> str:
@@ -48,13 +75,23 @@ def etiqueta_base(s) -> str:
     return f":red[**PRODUCTIVA {s.company_db}**]" if s.productiva else f"**{s.company_db}** (test)"
 
 
+def olvidar_resultado_nuevo(carga_id: str):
+    """Una acción posterior sobre la carga (reenviar, crear EM, cerrar) deja obsoleto el resultado de su
+    primera ejecución: se quita para no mostrar estados viejos."""
+    for k in ("res_nueva_tr", "res_nueva_tf"):
+        if ss.get(k, (None, None))[1] == carga_id:
+            ss.pop(k)
+
+
 def terminar(clave_res: str, valor: tuple, clave_sel: str, carga_id: str, plan: str | None = None):
+    if not clave_res.startswith("res_nueva"):
+        olvidar_resultado_nuevo(carga_id)
     ss[clave_res] = valor
     ss[clave_sel] = carga_id
     if plan:
         ss.pop(plan, None)
     ss.n_ejecuciones += 1
-    st.rerun()
+    recargar()
 
 
 def manejar_error(e: Exception):
@@ -62,8 +99,7 @@ def manejar_error(e: Exception):
         st.error(f"El archivo tiene {len(e.errores)} error(es). Corrígelo y vuelve a validar.")
         st.dataframe(pd.DataFrame({"Error": e.errores}), hide_index=True, width="stretch")
     elif isinstance(e, SesionExpirada):
-        ss.pop("sesion", None)
-        ss.aviso_sesion = str(e)
+        expirar_sesion()
         st.rerun()
     elif isinstance(e, ErrorSAP):
         st.error(str(e))
@@ -103,6 +139,20 @@ def avisos_estados(estados: pd.Series):
         st.warning("Hay documentos sin enviar (la sesión expiró). Vuelve a conectar y reenvíalos.")
 
 
+def resultado_nueva_carga(clave: str, fid: str):
+    """Resultado de la última ejecución de una carga nueva, debajo del Excel que se subió."""
+    res = ss.get(clave)
+    if not res or res[0] != fid:
+        return
+    _, carga_id, filas, ruta = res
+    st.markdown(f"#### Resultado · carga {carga_id}")
+    mostrar_resultado(filas, ruta)
+    estados = pd.Series([f["ESTADO"] for f in filas])
+    if (estados != Estado.OK.value).any():
+        avisos_estados(estados)
+        st.caption("Los documentos que no se crearon se reenvían, corrigen o cierran en la sección **Cargas**.")
+
+
 def confirmar(texto: str, clave: str) -> bool:
     return st.checkbox(texto, key=f"{clave}_{ss.n_ejecuciones}")
 
@@ -117,7 +167,8 @@ def incluir_revisar(n: int, clave: str) -> bool:
 def elegir_carga(cls, s, clave: str, tiene_pendientes):
     """Selector de cargas de la base (por defecto solo las que tienen pendientes)."""
     todas = st.checkbox("Mostrar también cargas terminadas", key=f"todas_{clave}")
-    cargas = [c for c in cls.listar(s.company_db) if todas or tiene_pendientes(c)]
+    sel = ss.get(clave)  # la carga con la que se está trabajando sigue visible aunque haya quedado terminada
+    cargas = [c for c in cls.listar(s.company_db) if todas or tiene_pendientes(c) or c.id == sel]
     if not cargas:
         st.caption("No hay cargas con pendientes en esta base.")
         return None
@@ -138,7 +189,7 @@ def barra_conexion():
     with st.sidebar:
         st.header("Conexión SAP")
         if "aviso_sesion" in ss:
-            st.warning(ss.pop("aviso_sesion"))
+            st.warning(ss.aviso_sesion)
 
         s = ss.get("sesion")
         if s:
@@ -152,11 +203,15 @@ def barra_conexion():
                 cliente.logout(s)
                 for k in ESTADO_APP:
                     ss.pop(k, None)
-                st.rerun()
+                recargar()
             return
 
-        empresa = st.selectbox("Empresa", list(EMPRESAS))
-        tipo = st.radio("Tipo de base", [TEST, PRODUCTIVA], horizontal=True)
+        ult_empresa, ult_tipo = ss.get("ultima_conexion", (None, TEST))
+        empresas = list(EMPRESAS)
+        empresa = st.selectbox("Empresa", empresas,
+                               index=empresas.index(ult_empresa) if ult_empresa in empresas else 0)
+        tipo = st.radio("Tipo de base", [TEST, PRODUCTIVA], horizontal=True,
+                        index=[TEST, PRODUCTIVA].index(ult_tipo))
         db = EMPRESAS[empresa][tipo]
         if tipo == PRODUCTIVA:
             st.error(f"Base **productiva**: {db}")
@@ -175,7 +230,9 @@ def barra_conexion():
                     with st.spinner("Conectando..."):
                         ss.sesion = cliente.login(CFG.url, db, usuario, clave, CFG.verify_ssl,
                                                   empresa, tipo == PRODUCTIVA)
-                    st.rerun()
+                    ss.ultima_conexion = (empresa, tipo)
+                    ss.pop("aviso_sesion", None)
+                    recargar()
                 except ErrorSAP as e:
                     st.error(str(e))
 
@@ -200,13 +257,16 @@ def tab_traslado():
 def nueva_carga_traslado(s):
     st.markdown("### Nueva carga")
     archivo = st.file_uploader("Excel de traslado", type=["xlsx"], key="up_traslado")
-    comentario = st.text_input("Comentario de los documentos (opcional)", max_chars=254, key="com_traslado")
+    comentario = st.text_input("Comentario por defecto (opcional)", max_chars=254, key="com_traslado",
+                               help="Se usa en las filas del Excel sin COMENTARIO. Si ambos están vacíos, la app "
+                                    "arma uno automático: 'Traslado ubicaciones <bodega> doc N'.")
     if not archivo:
         return
     fid = huella_archivo(archivo, comentario, s.company_db)
 
     if st.button("Validar y simular", key="val_traslado"):
         ss.pop("plan_traslado", None)
+        ss.pop("res_nueva_tr", None)
         try:
             with st.spinner("Validando, resolviendo ubicaciones y revisando cargas anteriores..."):
                 plan = traslado.preparar(io.BytesIO(archivo.getvalue()), gateway(), CFG.max_articulos, comentario)
@@ -215,6 +275,7 @@ def nueva_carga_traslado(s):
         except Exception as e:
             manejar_error(e)
 
+    resultado_nueva_carga("res_nueva_tr", fid)
     if ss.get("plan_traslado", (None,))[0] != fid:
         return
     plan: traslado.PlanTraslado = ss.plan_traslado[1]
@@ -246,11 +307,13 @@ def nueva_carga_traslado(s):
             manejar_error(e)
             return
         ruta = carga.guardar_log("traslado", filas)
-        terminar("res_traslado", (carga.id, filas, ruta), "sel_tr", carga.id, "plan_traslado")
+        terminar("res_nueva_tr", (fid, carga.id, filas, ruta), "sel_tr", carga.id, "plan_traslado")
 
 
 def cargas_traslado(s):
     st.markdown("### Cargas")
+    if "msg_cierre_tr" in ss:
+        st.success(ss.pop("msg_cierre_tr"))
     carga = elegir_carga(CargaTraslado, s, "sel_tr", lambda c: bool(c.pendientes()))
     if not carga:
         return
@@ -272,6 +335,7 @@ def cargas_traslado(s):
             return
         ruta = carga.guardar_log("traslado_reenvio", filas)
         terminar("res_traslado", (carga.id, filas, ruta), "sel_tr", carga.id)
+    cerrar_traslados(s, carga)
 
     res = ss.get("res_traslado", (None,))
     if res[0] == carga.id:
@@ -305,6 +369,7 @@ def nueva_carga_transformacion(s):
 
     if st.button("Validar y simular", key="val_transf"):
         ss.pop("plan_transf", None)
+        ss.pop("res_nueva_tf", None)
         try:
             with st.spinner("Validando, resolviendo ubicaciones y revisando lotes y cargas anteriores..."):
                 plan = transformacion.preparar(io.BytesIO(archivo.getvalue()), gateway(), s.company_db,
@@ -313,6 +378,7 @@ def nueva_carga_transformacion(s):
         except Exception as e:
             manejar_error(e)
 
+    resultado_nueva_carga("res_nueva_tf", fid)
     if ss.get("plan_transf", (None,))[0] != fid:
         return
     plan: transformacion.PlanTransformacion = ss.plan_transf[1]
@@ -323,7 +389,7 @@ def nueva_carga_transformacion(s):
         "Lotes origen": ", ".join(f"{l.lote} ({l.cantidad:g})" for l in t.lotes_origen),
         "Lotes destino": ", ".join(f"{l.lote} ({l.cantidad:g}, vence {l.vencimiento})" for l in t.lotes_destino),
         "Ubicación": ", ".join(dict.fromkeys(a.bin_code for a in t.salidas_sm)),
-        "Cuenta": t.cuenta} for t in plan.items]),
+        "Cuenta": t.cuenta, "Comentario": t.comentario or "(automático)"} for t in plan.items]),
         hide_index=True, width="stretch")
     with st.expander("Ver JSON que se enviará a SAP"):
         k = st.selectbox("Artículo", range(len(plan.items)),
@@ -348,24 +414,29 @@ def nueva_carga_transformacion(s):
             manejar_error(e)
             return
         ruta = carga.guardar_log("SM", filas)
-        terminar("res_transf", (carga.id, filas, ruta), "sel_tf", carga.id, "plan_transf")
+        terminar("res_nueva_tf", (fid, carga.id, filas, ruta), "sel_tf", carga.id, "plan_transf")
 
 
 def cargas_transformacion(s):
     st.markdown("### Cargas")
+    if "msg_cierre_tf" in ss:
+        st.success(ss.pop("msg_cierre_tf"))
     carga = elegir_carga(CargaTransformacion, s, "sel_tf", lambda c: c.tiene_pendientes())
     if not carga:
         return
     con_sm, pend_sm, pend_em = carga.con_sm(), carga.sm_pendientes(), carga.em_pendientes()
-    c = st.columns(4)
+    cerrados = sum(e[x]["estado"] == Estado.CERRADO.value for e in carga.articulos.values() for x in ("sm", "em"))
+    c = st.columns(5)
     c[0].metric("Artículos", len(carga.articulos))
     c[1].metric("SM creadas", len(con_sm))
-    c[2].metric("EM creadas", len(con_sm) - len(pend_em))
+    c[2].metric("EM creadas", sum(e["em"]["estado"] == Estado.OK.value for _, e in con_sm))
     c[3].metric("EM pendientes", len(pend_em))
+    c[4].metric("Cerrados", cerrados)
 
     if pend_sm:
         sm_pendientes(s, carga, pend_sm)
     etapa_em(s, carga, pend_em)
+    cerrar_transformacion(s, carga)
 
     res = ss.get("res_transf", (None,))
     if res[0] == carga.id:
@@ -405,7 +476,7 @@ def etapa_em(s, carga: CargaTransformacion, pend: list):
         st.caption("Se habilita cuando la carga tenga SM creadas.")
         return
     if not pend:
-        st.success("Todas las EM de esta carga están creadas.")
+        st.success("No hay EM pendientes en esta carga.")
         return
 
     dias = CFG.dias_minimos_vencimiento
@@ -442,7 +513,7 @@ def etapa_em(s, carga: CargaTransformacion, pend: list):
                     transformacion.recalcular_costos(carga, gateway())
                 except Exception as e:
                     manejar_error(e)
-            st.rerun()
+            recargar()
 
     n_revisar = sum(e["em"]["estado"] == Estado.REVISAR.value for _, e in pend)
     con_revisar = incluir_revisar(n_revisar, "rev_em")
@@ -506,7 +577,129 @@ def corregir_em(carga: CargaTransformacion):
                 return
             ss.avisos_corr = avisos
             ss.n_ejecuciones += 1
-            st.rerun()
+            recargar()
+
+
+# --------------------------------------------------------------------------- #
+# Cerrar documentos que no se crearon
+# --------------------------------------------------------------------------- #
+AVISO_REVISAR_CIERRE = ("Hay documentos en REVISAR: podrían haberse creado en SAP sin que la app lo sepa. "
+                        "Revísalo en SAP antes de cerrarlos; si existen, no aparecerán en Documentos creados.")
+
+
+def bloque_cierre(s, carga, opciones: list, etiqueta, avisos, cerrar_fn, msg_key: str, clave: str):
+    """Selector + motivo + confirmación para cerrar documentos pendientes de una carga."""
+    if not opciones:
+        return
+    with st.expander("Cerrar documentos que no se crearon"):
+        st.caption("Un documento cerrado deja de quedar pendiente y no se puede reenviar. Queda registrado quién, "
+                   "cuándo y por qué; la carga pasa a terminada cuando no le quedan pendientes.")
+        n = ss.n_ejecuciones
+        sel = st.multiselect("Documentos a cerrar", range(len(opciones)), format_func=lambda i: etiqueta(opciones[i]),
+                             key=f"sel_{clave}_{carga.id}_{n}")
+        elegidos = [opciones[i] for i in sel]
+        for a in avisos(elegidos):
+            st.warning(a)
+        motivo = st.text_input("Motivo del cierre (obligatorio)", max_chars=200, key=f"mot_{clave}_{carga.id}_{n}")
+        if elegidos and confirmar(f"Confirmo cerrar {len(elegidos)} documento(s) de {carga.id}: no se podrán "
+                                  "reenviar", f"conf_{clave}")                 and st.button(f"Cerrar {len(elegidos)} documento(s)", disabled=not motivo.strip(), key=f"run_{clave}"):
+            try:
+                filas = cerrar_fn(elegidos, motivo)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            ruta = carga.guardar_log("cierre", filas)
+            olvidar_resultado_nuevo(carga.id)
+            ss[msg_key] = f"Se cerraron {len(filas)} documento(s) de la carga {carga.id}. Log: {ruta.name}"
+            ss.n_ejecuciones += 1
+            recargar()
+
+
+def cerrar_traslados(s, carga: CargaTraslado):
+    pend = carga.pendientes()
+
+    def avisos(elegidos):
+        return [AVISO_REVISAR_CIERRE] if any(d["estado"] == Estado.REVISAR.value for d in elegidos) else []
+
+    bloque_cierre(s, carga, pend,
+                  lambda d: f"{d['doc']} · {d['estado'] or 'PENDIENTE'} · {d['articulos'][:60]}",
+                  avisos, lambda elegidos, motivo: traslado.cerrar(carga, [d["doc"] for d in elegidos], s.usuario, motivo),
+                  "msg_cierre_tr", "cierre_tr")
+
+
+def cerrar_transformacion(s, carga: CargaTransformacion):
+    opciones = transformacion.cerrables(carga)
+
+    def etiqueta(o):
+        clave, etapa = o
+        e = carga.get(clave)
+        extra = f" · SM {e['sm']['doc_num']} creada" if etapa == "EM" else ""
+        return f"{etapa} · {e['datos']['articulo']} ({e['datos']['bodega']}) · {e[etapa.lower()]['estado'] or 'PENDIENTE'}{extra}"
+
+    def avisos(elegidos):
+        out = []
+        em = [carga.get(k) for k, etapa in elegidos if etapa == "EM"]
+        if em:
+            out.append("Cerrar una EM deja la mercadería de su SM fuera de stock (SM "
+                       + ", ".join(str(e["sm"]["doc_num"]) for e in em)
+                       + "). Deberás resolverlo directamente en SAP (por ejemplo, con una EM manual).")
+        if any(carga.get(k)[etapa.lower()]["estado"] == Estado.REVISAR.value for k, etapa in elegidos):
+            out.append(AVISO_REVISAR_CIERRE)
+        return out
+
+    bloque_cierre(s, carga, opciones, etiqueta, avisos,
+                  lambda elegidos, motivo: transformacion.cerrar(carga, elegidos, s.usuario, motivo),
+                  "msg_cierre_tf", "cierre_tf")
+
+
+# --------------------------------------------------------------------------- #
+# Pestaña: documentos creados
+# --------------------------------------------------------------------------- #
+COLUMNAS_DOCS = {"FECHA": "Fecha", "TIPO": "Tipo de documento", "DOCNUM": "DocNum", "DOCENTRY": "DocEntry",
+                 "CARGA": "Carga", "BODEGA": "Bodega", "ARTICULOS": "Artículos", "CANTIDAD": "Cantidad",
+                 "REFERENCIA": "Referencia", "USUARIO": "Usuario", "CREADO": "Creado (app)"}
+
+
+def tab_documentos():
+    st.subheader("Documentos creados en SAP")
+    st.caption("Todos los documentos que la app creó en la base conectada, de todas las cargas. "
+               "Fecha = fecha del documento en SAP (o la de envío, en documentos anteriores a la versión 1.1).")
+    s = ss.get("sesion")
+    if not s:
+        st.info("Conéctate a SAP en la barra lateral para ver los documentos de esa base.")
+        return
+    docs = registro.documentos_creados(s.company_db)
+    if not docs:
+        st.info(f"Aún no hay documentos creados con la app en {s.company_db}.")
+        return
+    df = pd.DataFrame(docs)
+    df["FECHA"] = df["FECHA_DOC"].where(df["FECHA_DOC"] != "", df["CREADO"].str[:10])
+    fechas = pd.to_datetime(df["FECHA"]).dt.date
+
+    c1, c2, c3 = st.columns([2, 2, 2])
+    tipos = c1.multiselect("Tipo de documento", registro.TIPOS_DOCUMENTO, default=registro.TIPOS_DOCUMENTO)
+    carga = c2.selectbox("Carga", ["Todas"] + list(dict.fromkeys(df["CARGA"])))
+    rango = c3.date_input("Fechas", (fechas.min(), fechas.max()), format="YYYY-MM-DD")
+    desde, hasta = (rango[0], rango[-1]) if isinstance(rango, (tuple, list)) and rango else (fechas.min(), fechas.max())
+
+    filtro = df["TIPO"].isin(tipos) & fechas.between(desde, hasta)
+    if carga != "Todas":
+        filtro &= df["CARGA"] == carga
+    vista = df.loc[filtro, list(COLUMNAS_DOCS)].rename(columns=COLUMNAS_DOCS)
+
+    cols = st.columns(len(registro.TIPOS_DOCUMENTO) + 1)
+    cols[0].metric("Documentos", len(vista))
+    for col, tipo in zip(cols[1:], registro.TIPOS_DOCUMENTO):
+        col.metric(tipo, int((vista["Tipo de documento"] == tipo).sum()))
+    st.dataframe(vista.astype(str), hide_index=True, width="stretch")
+
+    excel = io.BytesIO()
+    vista.to_excel(excel, index=False)
+    d1, d2 = st.columns(2)
+    d1.download_button("Descargar Excel", excel.getvalue(), file_name=f"documentos_{s.company_db}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    d2.download_button("Descargar CSV", vista.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                       file_name=f"documentos_{s.company_db}.csv", mime="text/csv", width="stretch")
 
 
 # --------------------------------------------------------------------------- #
@@ -528,15 +721,24 @@ def tab_plantillas():
 # --------------------------------------------------------------------------- #
 barra_conexion()
 st.title("Reorganización de stock SAP B1")
+if not ss.get("sesion") and "aviso_sesion" in ss:
+    st.warning(ss.aviso_sesion)
 if ss.get("sesion") and ss.sesion.productiva:
     st.error(f"Conectado a la base **PRODUCTIVA** {ss.sesion.company_db} ({ss.sesion.empresa}). "
              "Los documentos que se ejecuten quedan en producción.")
 st.caption("1 · Consolidar en PISO → 2 · Transformar lotes (SM y luego EM) → 3 · Redistribuir desde PISO. "
            "Validar no crea nada en SAP; solo los botones de crear o reenviar envían documentos.")
-t1, t2, t3 = st.tabs(["Traslado (pasos 1 y 3)", "Transformación (paso 2)", "Plantillas"])
+t1, t2, t3, t4 = st.tabs(["Traslado (pasos 1 y 3)", "Transformación (paso 2)", "Documentos creados", "Plantillas"])
 with t1:
     tab_traslado()
 with t2:
     tab_transformacion()
 with t3:
+    tab_documentos()
+with t4:
     tab_plantillas()
+
+# si alguna consulta de esta ejecución detectó la sesión expirada (sin pasar por un botón), pedir reconectar
+if ss.get("sesion") and any(gw.sesion_expirada for gw in _GATEWAYS):
+    expirar_sesion()
+    st.rerun()

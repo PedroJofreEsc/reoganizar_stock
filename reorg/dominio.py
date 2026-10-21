@@ -44,6 +44,10 @@ class Estado(str, Enum):
     REVISAR = "REVISAR"            # sin respuesta: revisar en SAP antes de reenviar
     NO_EJECUTADO = "NO_EJECUTADO"  # no se envió (la sesión expiró antes)
     ENVIANDO = "ENVIANDO"          # solo en el registro mientras se espera la respuesta
+    CERRADO = "CERRADO"            # el usuario lo dio por cerrado sin crearlo: no se reenvía
+
+
+FINALES = (Estado.OK.value, Estado.CERRADO.value)  # estados que ya no quedan pendientes
 
 
 REENVIABLES = (Estado.ERROR.value, Estado.NO_EJECUTADO.value)
@@ -106,6 +110,7 @@ class Transformacion:
     lotes_destino: list[Lote]        # entran en la EM, ordenados, con vencimiento
     salidas_sm: list[AsignacionBin]  # por lote de origen y bin
     entradas_em: list[AsignacionBin]  # por lote destino y bin
+    comentario: str = ""             # Comments de la SM y la EM ("" = comentario automático)
 
     @property
     def clave(self) -> str:
@@ -121,7 +126,7 @@ class Transformacion:
         bins = lambda xs: [AsignacionBin(**x) for x in xs]
         return cls(d["articulo"], d["bodega"], d["cantidad"], d["cuenta"], list(d["dims"]),
                    lotes(d["lotes_origen"]), lotes(d["lotes_destino"]),
-                   bins(d["salidas_sm"]), bins(d["entradas_em"]))
+                   bins(d["salidas_sm"]), bins(d["entradas_em"]), d.get("comentario", ""))
 
 
 @dataclass
@@ -136,6 +141,7 @@ class DocCreado:
     doc_entry: int
     doc_num: int
     trans_num: int | None = None
+    doc_date: str = ""  # fecha del documento en SAP (AAAA-MM-DD)
 
 
 # --------------------------------------------------------------------------- #

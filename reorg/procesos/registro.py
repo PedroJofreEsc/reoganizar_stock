@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from reorg.dominio import Estado, Transformacion
+from reorg.dominio import FINALES, Estado, Transformacion
 
 RAIZ_SALIDAS = Path(__file__).resolve().parents[2] / "salidas"
 SEP = ";"
@@ -40,6 +40,11 @@ def carpeta_cargas(company_db: str) -> Path:
 
 def ahora() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def huella_transformacion(datos: dict) -> str:
+    """Huella del movimiento (sin el comentario: el mismo movimiento con otro comentario es duplicado)."""
+    return huella({k: v for k, v in datos.items() if k != "comentario"})
 
 
 def huella(d) -> str:
@@ -60,6 +65,21 @@ def _escribir_seguro(ruta: Path, texto: str):
             time.sleep(0.1 * (intento + 1))
     ruta.write_text(texto, encoding="utf-8")
     tmp.unlink(missing_ok=True)
+
+
+def cerrar_documento(doc: dict, usuario: str, motivo: str):
+    """Marca un documento no creado como CERRADO (deja de estar pendiente). Guarda quién, cuándo,
+    el motivo y el estado previo."""
+    if doc["estado"] in FINALES or doc["estado"] == Estado.ENVIANDO.value:
+        raise ValueError(f"no se puede cerrar un documento en estado {doc['estado']}")
+    doc["cierre"] = {"fecha": ahora(), "usuario": usuario, "motivo": motivo.strip(),
+                     "estado_previo": doc["estado"] or "PENDIENTE", "error_previo": doc.get("error", "")}
+    doc["estado"] = Estado.CERRADO.value
+
+
+def texto_cierre(doc: dict) -> str:
+    c = doc.get("cierre")
+    return f"{c['fecha']} {c['usuario']}: {c['motivo']} (estaba {c['estado_previo']})" if c else ""
 
 
 def escribir_csv(ruta: Path, filas: list[dict]):
@@ -167,14 +187,15 @@ class CargaTraslado(Carga):
         return self.docs
 
     def pendientes(self) -> list[dict]:
-        return [d for d in self.docs if d["estado"] != Estado.OK.value]
+        return [d for d in self.docs if d["estado"] not in FINALES]
 
     @staticmethod
     def fila_log(doc: dict, carga_id: str) -> dict:
-        return {"CARGA": carga_id, "DOC": doc["doc"], "BODEGA": doc["bodega"], "N_ARTICULOS": doc["n_articulos"],
+        return {"CARGA": carga_id, "DOC": doc["doc"], "BODEGA": doc["bodega"],
+                "COMENTARIO": doc.get("comentario", ""), "N_ARTICULOS": doc["n_articulos"],
                 "ARTICULOS": doc["articulos"], "CANTIDAD": doc["cantidad"], "PAYLOAD": doc["payload"],
                 "DOCENTRY": doc["doc_entry"] or "", "DOCNUM": doc["doc_num"] or "", "ESTADO": doc["estado"],
-                "INTENTOS": doc["intentos"], "ERROR": doc["error"]}
+                "INTENTOS": doc["intentos"], "ERROR": doc["error"], "CIERRE": texto_cierre(doc)}
 
 
 def traslados_creados(company_db: str) -> dict[str, list[tuple[str, dict]]]:
@@ -222,7 +243,7 @@ class CargaTransformacion(Carga):
 
     def registrar(self, t: Transformacion) -> dict:
         datos = t.to_dict()
-        return self.articulos.setdefault(t.clave, {"datos": datos, "huella": huella(datos),
+        return self.articulos.setdefault(t.clave, {"datos": datos, "huella": huella_transformacion(datos),
                                                    "sm": _sm_vacia(), "em": _em_vacia()})
 
     @staticmethod
@@ -231,15 +252,15 @@ class CargaTransformacion(Carga):
 
     # ---- consultas -------------------------------------------------------- #
     def sm_pendientes(self) -> list[tuple[str, dict]]:
-        """Artículos cuya SM no se creó (error, sin enviar o por revisar)."""
-        return [(k, e) for k, e in self.articulos.items() if e["sm"]["estado"] != Estado.OK.value]
+        """Artículos cuya SM no se creó ni se cerró (error, sin enviar o por revisar)."""
+        return [(k, e) for k, e in self.articulos.items() if e["sm"]["estado"] not in FINALES]
 
     def con_sm(self) -> list[tuple[str, dict]]:
         return [(k, e) for k, e in self.articulos.items() if e["sm"]["estado"] == Estado.OK.value]
 
     def em_pendientes(self) -> list[tuple[str, dict]]:
-        """Artículos con SM creada y EM no creada (pendiente, con error o por revisar)."""
-        return [(k, e) for k, e in self.con_sm() if e["em"]["estado"] != Estado.OK.value]
+        """Artículos con SM creada y EM no creada ni cerrada (pendiente, con error o por revisar)."""
+        return [(k, e) for k, e in self.con_sm() if e["em"]["estado"] not in FINALES]
 
     def tiene_pendientes(self) -> bool:
         return bool(self.sm_pendientes() or self.em_pendientes())
@@ -249,7 +270,7 @@ class CargaTransformacion(Carga):
         d, sm, em = e["datos"], e["sm"], e["em"]
         doc = sm if etapa == "SM" else em
         return {"CARGA": self.id, "CLAVE": clave, "ARTICULO": d["articulo"], "BODEGA": d["bodega"],
-                "CANTIDAD": d["cantidad"],
+                "CANTIDAD": d["cantidad"], "COMENTARIO": d.get("comentario", ""),
                 "LOTES_ORIGEN": ", ".join(l["lote"] for l in d["lotes_origen"]),
                 "LOTES_DESTINO": ", ".join(l["lote"] for l in d["lotes_destino"]),
                 "ETAPA": etapa, "ESTADO": doc["estado"],
@@ -261,9 +282,51 @@ class CargaTransformacion(Carga):
                 "PAYLOAD_EM": em["payload"],
                 "PAYLOADS_EM_ANTERIORES": ", ".join(em.get("payloads_anteriores", [])),
                 "CORRECCIONES": " | ".join(em.get("correcciones", [])),
-                "NOTA": em["nota"], "INTENTOS": doc["intentos"], "ERROR": doc["error"]}
+                "NOTA": em["nota"], "INTENTOS": doc["intentos"], "ERROR": doc["error"],
+                "CIERRE": texto_cierre(doc)}
 
 
 def transformaciones_registradas(company_db: str) -> list[tuple[str, str, dict]]:
     """[(carga, clave, entrada)] de todas las transformaciones con SM creada en la base."""
     return [(c.id, k, e) for c in CargaTransformacion.listar(company_db) for k, e in c.con_sm()]
+
+
+# --------------------------------------------------------------------------- #
+# Documentos creados en SAP (todas las cargas de la base)
+# --------------------------------------------------------------------------- #
+TIPO_TRASLADO = "Traslado de stock"
+TIPO_SM = "Salida de mercancía (SM)"
+TIPO_EM = "Entrada de mercancía (EM)"
+TIPOS_DOCUMENTO = [TIPO_TRASLADO, TIPO_SM, TIPO_EM]
+
+
+def documentos_creados(company_db: str) -> list[dict]:
+    """Un registro por documento creado (OK) en SAP, del más reciente al más antiguo.
+
+    FECHA_DOC es la fecha del documento que devolvió SAP (vacía en documentos creados antes de
+    que la app la guardara); CREADO es la fecha y hora local en que la app lo envió.
+    """
+    def fila(tipo, doc, carga, bodega, articulos, cantidad, referencia=""):
+        return {"CREADO": doc.get("fecha", ""), "FECHA_DOC": doc.get("doc_date", ""), "TIPO": tipo,
+                "DOCNUM": doc["doc_num"], "DOCENTRY": doc["doc_entry"], "CARGA": carga.id,
+                "BODEGA": bodega, "ARTICULOS": articulos, "CANTIDAD": cantidad, "REFERENCIA": referencia,
+                "USUARIO": carga.datos["usuario"], "EXCEL": carga.datos["excel"]}
+
+    ok = Estado.OK.value
+    out = []
+    for c in CargaTraslado.listar(company_db):
+        for d in c.docs:
+            if d["estado"] == ok:
+                out.append(fila(TIPO_TRASLADO, d, c, d["bodega"], d["articulos"], d["cantidad"],
+                                d.get("comentario", "")))
+    for c in CargaTransformacion.listar(company_db):
+        for e in c.articulos.values():
+            datos, sm, em = e["datos"], e["sm"], e["em"]
+            if sm["estado"] == ok:
+                out.append(fila(TIPO_SM, sm, c, datos["bodega"], datos["articulo"], datos["cantidad"],
+                                " · ".join(x for x in ("Lotes " + ", ".join(l["lote"] for l in datos["lotes_origen"]),
+                                                       datos.get("comentario", "")) if x)))
+            if em["estado"] == ok:
+                out.append(fila(TIPO_EM, em, c, datos["bodega"], datos["articulo"], datos["cantidad"],
+                                " · ".join(x for x in (f"Desde SM {sm['doc_num']}", datos.get("comentario", "")) if x)))
+    return sorted(out, key=lambda f: f["CREADO"], reverse=True)

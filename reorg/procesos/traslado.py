@@ -1,8 +1,9 @@
 """Traslado de stock entre ubicaciones de una misma bodega.
 
 Se usa para consolidar a PISO (paso 1) y para redistribuir desde PISO (paso 3).
-Excel, una fila por movimiento: ARTICULO, BODEGA, BIN_ORIGEN, BIN_DESTINO, CANTIDAD, LOTE.
-Un documento por bodega con hasta `max_articulos` artículos (una línea por artículo).
+Excel, una fila por movimiento: ARTICULO, BODEGA, BIN_ORIGEN, BIN_DESTINO, CANTIDAD, LOTE y
+COMENTARIO (opcional). El comentario va en la cabecera del documento (Comments), así que se arma
+un documento por bodega + comentario, con hasta `max_articulos` artículos (una línea por artículo).
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from reorg.procesos.comun import asignaciones, enviar, redondear, resolver_bins
 from reorg.procesos.registro import huella
 
 COLUMNAS = ["ARTICULO", "BODEGA", "BIN_ORIGEN", "BIN_DESTINO", "CANTIDAD", "LOTE"]
+OPCIONALES = ["COMENTARIO"]
+MAX_COMENTARIO = 254  # largo máximo de Comments en SAP
 
 Progreso = Callable[[int, int, dict], None] | None
 
@@ -31,8 +34,11 @@ class PlanTraslado:
 # Preparar: leer, validar, resolver bins y armar documentos (solo lecturas a SAP)
 # --------------------------------------------------------------------------- #
 def preparar(origen, gateway: Gateway, max_articulos: int = 20, comentario: str = "") -> PlanTraslado:
-    filas = excel.leer_filas(origen, COLUMNAS, crudas=())
+    """`comentario` se usa en las filas sin COMENTARIO; si tampoco hay, se arma uno automático."""
+    filas = excel.leer_filas(origen, COLUMNAS, OPCIONALES, crudas=())
     errores = excel.obligatorias(filas, ["ARTICULO", "BODEGA", "BIN_ORIGEN", "BIN_DESTINO"])
+    errores += [f"Fila {f['FILA']}: COMENTARIO tiene {len(f['COMENTARIO'])} caracteres (máximo {MAX_COMENTARIO})"
+                for f in filas if len(f["COMENTARIO"]) > MAX_COMENTARIO]
     if errores:
         raise ErrorValidacion(errores)
 
@@ -44,8 +50,8 @@ def preparar(origen, gateway: Gateway, max_articulos: int = 20, comentario: str 
     if not filas:
         raise ErrorValidacion(["No quedan movimientos después de omitir las filas con origen = destino"])
 
-    docs = []
-    for (bodega,), fb in excel.agrupar(filas, "BODEGA").items():
+    docs, n_bodega = [], {}
+    for (bodega, coment_excel), fb in excel.agrupar(filas, "BODEGA", "COMENTARIO").items():
         lineas = []
         for (articulo,), fa in excel.agrupar(fb, "ARTICULO").items():
             ctx = f"{bodega} / {articulo}"
@@ -56,9 +62,10 @@ def preparar(origen, gateway: Gateway, max_articulos: int = 20, comentario: str 
                 continue
             errores += resolver_bins(gateway, bodega, linea.salidas + linea.entradas, ctx)
             lineas.append(linea)
-        for n, ini in enumerate(range(0, len(lineas), max_articulos), start=1):
+        for ini in range(0, len(lineas), max_articulos):
+            n = n_bodega[bodega] = n_bodega.get(bodega, 0) + 1
             docs.append(DocTraslado(f"{bodega}_{n:03d}", bodega,
-                                    comentario or f"Traslado ubicaciones {bodega} doc {n}",
+                                    coment_excel or comentario or f"Traslado ubicaciones {bodega} doc {n}",
                                     lineas[ini:ini + max_articulos]))
     if errores:
         raise ErrorValidacion(errores)
@@ -99,7 +106,8 @@ def avisar_duplicados(plan: PlanTraslado, company_db: str):
 def ejecutar(plan: PlanTraslado, carga: registro.CargaTraslado, gateway: Gateway,
              on_progreso: Progreso = None) -> list[dict]:
     for doc in plan.docs:
-        carga.docs.append({"doc": doc.id, "bodega": doc.bodega, "n_articulos": len(doc.lineas),
+        carga.docs.append({"doc": doc.id, "bodega": doc.bodega, "comentario": doc.comentario,
+                           "n_articulos": len(doc.lineas),
                            "articulos": ", ".join(doc.articulos), "cantidad": redondear(doc.cantidad),
                            "huella": huella_doc(doc), "payload": gateway.guardar_traslado(doc),
                            "estado": "", "doc_entry": None, "doc_num": None, "error": "", "intentos": 0,
@@ -137,10 +145,26 @@ def _enviar(carga: registro.CargaTraslado, docs: list[dict], gateway: Gateway, o
             estado, r, error, detenido = enviar(gateway, "traslado", d["payload"])
             d.update(estado=estado, error=error)
             if r:
-                d.update(doc_entry=r.doc_entry, doc_num=r.doc_num)
+                d.update(doc_entry=r.doc_entry, doc_num=r.doc_num, doc_date=r.doc_date)
             fila = carga.fila_log(d, carga.id)
         carga.guardar()
         filas.append(fila)
         if on_progreso:
             on_progreso(i, len(docs), fila)
+    return filas
+
+
+# --------------------------------------------------------------------------- #
+# Cerrar documentos que no se crearon (dejan de quedar pendientes)
+# --------------------------------------------------------------------------- #
+def cerrar(carga: registro.CargaTraslado, docs: list[str], usuario: str, motivo: str) -> list[dict]:
+    """Cierra los documentos indicados (por id) que no están OK. Devuelve las filas para el log."""
+    if not motivo.strip():
+        raise ValueError("indica el motivo del cierre")
+    filas = []
+    for d in carga.pendientes():
+        if d["doc"] in docs:
+            registro.cerrar_documento(d, usuario, motivo)
+            filas.append(carga.fila_log(d, carga.id))
+    carga.guardar()
     return filas
