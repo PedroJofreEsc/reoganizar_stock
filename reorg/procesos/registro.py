@@ -22,14 +22,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from reorg.dominio import FINALES, Estado, Transformacion
+from reorg.dominio import FINALES, EntradaDirecta, Estado, Transformacion
 
 RAIZ_SALIDAS = Path(__file__).resolve().parents[2] / "salidas"
 SEP = ";"
 ENC = "utf-8-sig"
 
-TRASLADO, TRANSFORMACION = "traslado", "transformacion"
-PREFIJO = {TRASLADO: "TR", TRANSFORMACION: "TF"}
+TRASLADO, TRANSFORMACION, ENTRADA = "traslado", "transformacion", "entrada"
+PREFIJO = {TRASLADO: "TR", TRANSFORMACION: "TF", ENTRADA: "EN"}
 
 
 def carpeta_cargas(company_db: str) -> Path:
@@ -292,12 +292,75 @@ def transformaciones_registradas(company_db: str) -> list[tuple[str, str, dict]]
 
 
 # --------------------------------------------------------------------------- #
+# Carga de EM directa
+# --------------------------------------------------------------------------- #
+def _emd_vacia() -> dict:
+    return {"estado": "", "payload": "", "doc_entry": None, "doc_num": None, "doc_date": "",
+            "precio_sap": None, "total_sap": None, "error": "", "fecha": "", "intentos": 0}
+
+
+class CargaEntrada(Carga):
+    """articulos: {"BODEGA|ARTICULO": {"datos": EntradaDirecta, "huella", "em": {...}}}"""
+
+    proceso = ENTRADA
+
+    @staticmethod
+    def _vacio() -> dict:
+        return {"articulos": {}}
+
+    @property
+    def articulos(self) -> dict[str, dict]:
+        return self.datos["articulos"]
+
+    def _documentos(self) -> list[dict]:
+        return [e["em"] for e in self.articulos.values()]
+
+    def get(self, clave: str) -> dict | None:
+        return self.articulos.get(clave)
+
+    def registrar(self, en: EntradaDirecta) -> dict:
+        datos = en.to_dict()
+        return self.articulos.setdefault(en.clave, {"datos": datos, "huella": huella_transformacion(datos),
+                                                    "em": _emd_vacia()})
+
+    @staticmethod
+    def entrada(e: dict) -> EntradaDirecta:
+        return EntradaDirecta.from_dict(e["datos"])
+
+    def pendientes(self) -> list[tuple[str, dict]]:
+        return [(k, e) for k, e in self.articulos.items() if e["em"]["estado"] not in FINALES]
+
+    def tiene_pendientes(self) -> bool:
+        return bool(self.pendientes())
+
+    def fila_log(self, clave: str) -> dict:
+        e = self.articulos[clave]
+        d, em = e["datos"], e["em"]
+        return {"CARGA": self.id, "CLAVE": clave, "ARTICULO": d["articulo"], "BODEGA": d["bodega"],
+                "CANTIDAD": d["cantidad"], "COMENTARIO": d.get("comentario", ""),
+                "LOTES": ", ".join(f"{l['lote']} ({l['vencimiento']})" for l in d["lotes"]),
+                "BINS": ", ".join(dict.fromkeys(a["bin_code"] for a in d["entradas"])),
+                "PAYLOAD": em["payload"], "DOCENTRY": em["doc_entry"] or "", "DOCNUM": em["doc_num"] or "",
+                "PRECIO_SAP": "" if em["precio_sap"] is None else em["precio_sap"],
+                "TOTAL_SAP": "" if em["total_sap"] is None else em["total_sap"],
+                "ESTADO": em["estado"], "INTENTOS": em["intentos"], "ERROR": em["error"],
+                "CIERRE": texto_cierre(em)}
+
+
+def entradas_registradas(company_db: str) -> list[tuple[str, str, dict]]:
+    """[(carga, clave, entrada)] de las EM directas creadas (OK) en la base."""
+    return [(c.id, k, e) for c in CargaEntrada.listar(company_db)
+            for k, e in c.articulos.items() if e["em"]["estado"] == Estado.OK.value]
+
+
+# --------------------------------------------------------------------------- #
 # Documentos creados en SAP (todas las cargas de la base)
 # --------------------------------------------------------------------------- #
 TIPO_TRASLADO = "Traslado de stock"
 TIPO_SM = "Salida de mercancía (SM)"
 TIPO_EM = "Entrada de mercancía (EM)"
-TIPOS_DOCUMENTO = [TIPO_TRASLADO, TIPO_SM, TIPO_EM]
+TIPO_EMD = "Entrada de mercancía directa (EM)"
+TIPOS_DOCUMENTO = [TIPO_TRASLADO, TIPO_SM, TIPO_EM, TIPO_EMD]
 
 
 def documentos_creados(company_db: str) -> list[dict]:
@@ -329,4 +392,12 @@ def documentos_creados(company_db: str) -> list[dict]:
             if em["estado"] == ok:
                 out.append(fila(TIPO_EM, em, c, datos["bodega"], datos["articulo"], datos["cantidad"],
                                 " · ".join(x for x in (f"Desde SM {sm['doc_num']}", datos.get("comentario", "")) if x)))
+    for c in CargaEntrada.listar(company_db):
+        for e in c.articulos.values():
+            datos, em = e["datos"], e["em"]
+            if em["estado"] == ok:
+                precio = "" if em.get("precio_sap") is None else f"Precio SAP {em['precio_sap']}"
+                out.append(fila(TIPO_EMD, em, c, datos["bodega"], datos["articulo"], datos["cantidad"],
+                                " · ".join(x for x in ("Lotes " + ", ".join(l["lote"] for l in datos["lotes"]),
+                                                       precio, datos.get("comentario", "")) if x)))
     return sorted(out, key=lambda f: f["CREADO"], reverse=True)

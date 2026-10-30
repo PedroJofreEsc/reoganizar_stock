@@ -55,6 +55,17 @@ El resultado de cada ejecución se muestra **debajo del Excel subido** (Nueva ca
 
 **Aviso de duplicados (no bloquea).** Al validar, la app compara el contenido con **todas las cargas guardadas de la base**, de cualquier fecha, terminadas o no. Avisa si un traslado es idéntico a uno ya creado, si una transformación es idéntica a una ya hecha, o si el artículo tiene una EM pendiente en otra carga. Solo conoce lo hecho con esta app en esta carpeta, no documentos creados directamente en SAP.
 
+## Entrada de mercancía directa (EM)
+
+Pestaña **Entrada de mercancía (EM)**: crea EM **sin SM de origen**, con **una EM de una línea por artículo**. Excel `4_entrada_mercancia.xlsx`, una fila por lote y bin:
+
+`ARTICULO | BODEGA | LOTE | VENCIMIENTO | CANTIDAD | BIN | CUENTA | DIM1..DIM5 | COMENTARIO`
+
+- `CUENTA`, `DIM1..DIM5` y `COMENTARIO` (opcional, máx. 254) deben ser iguales en todas las filas del artículo. Cada lote tiene una sola fecha de vencimiento.
+- **No se envía costo (`UnitPrice`)**: SAP asigna el precio. Después de crear cada EM, la app lee el documento y registra **`PRECIO_SAP`** y **`TOTAL_SAP`**, visibles en la carga, el log y en *Referencia* de Documentos creados. Sirve para comprobar si SAP usa el costo promedio.
+- Mismos avisos que en la transformación (no bloquean): lote que ya existe en SAP, vencimiento a menos de 90 días y EM idéntica en otra carga.
+- Usa el esquema de cargas (`EN-…`): JSON guardado, reenvío con el mismo JSON, cierre con motivo y resultado bajo el Excel subido.
+
 ## Documentos creados
 
 La pestaña **Documentos creados** lista todos los documentos que la app creó en la base conectada, de todas las cargas: traslados, SM y EM. Muestra **fecha, tipo de documento, DocNum y DocEntry**, además de la carga, la bodega, los artículos, la cantidad, la referencia (lotes de origen de la SM, o la SM de la que viene la EM) y el usuario. Se puede filtrar por tipo, carga y rango de fechas, y descargar en Excel o CSV.
@@ -174,3 +185,4 @@ Los CSV usan `;` y UTF-8 con BOM, así que se abren directo en Excel.
 - 2026-10-21: si cualquier consulta a SAP detecta la sesión expirada (incluso atrapada internamente, como al calcular un costo), la app desconecta y vuelve a habilitar la conexión en la barra lateral, conservando la empresa/tipo de base, la carga seleccionada y el último resultado.
 - 2026-10-21: corrección: el resultado de una ejecución vuelve a mostrarse bajo el Excel subido, y la carga en uso sigue visible en **Cargas** aunque quede terminada (antes desaparecía junto con su resultado).
 - 2026-10-21: columna opcional `COMENTARIO` en el Excel de cambio de lote, enviada en los Comentarios de la SM y de la EM (igual en todas las filas del artículo).
+- 2026-10-30: pestaña **Entrada de mercancía (EM)** para EM directas (sin SM), una por artículo, sin `UnitPrice`; se registra el precio y el total que asigna SAP. Cargas `EN-…`, plantilla `4_entrada_mercancia.xlsx` y tipo *Entrada de mercancía directa* en Documentos creados.

@@ -41,16 +41,13 @@ CAMBIOS / MEJORAS
     Columna opcional COMENTARIO en 2_transformacion_lotes, enviada en Comments de la SM y de la
     EM. Igual en todas las filas del artículo, máx. 254; vacío = comentario automático.
 
-[ ] #2 - Apartado para crear EM directamente en SAP
-    Registrado: 2026-10-20
-    Nueva sección para crear Entradas de Mercancía sin pasar por el flujo SM -> EM de la
-    transformación.
-    Por definir:
-      - Excel de carga: columnas (artículo, bodega, lote, vencimiento, cantidad, bin, costo,
-        cuenta, dimensiones).
-      - Costo unitario: lo informa el usuario o se toma de SAP (último costo / precio promedio).
-      - Si reutiliza el esquema de cargas (ID propio, JSON, reenvío, logs) como los demás procesos.
-      - Aviso de vencimiento < 90 días y de lote existente, igual que en la transformación.
+[x] #2 - Apartado para crear EM directamente en SAP
+    Registrado: 2026-10-20 / Hecho: 2026-10-30
+    Pestaña "Entrada de mercancía (EM)": una EM de una línea por artículo, sin SM de origen.
+    Excel 4_entrada_mercancia: ARTICULO, BODEGA, LOTE, VENCIMIENTO, CANTIDAD, BIN, CUENTA,
+    DIM1..DIM5, COMENTARIO. Sin UnitPrice: SAP asigna el costo; la app registra PRECIO_SAP y
+    TOTAL_SAP leyendo la EM creada. Cargas EN-…, reenvío, cierre y aviso de duplicados.
+    Probado en test (2026-10-30): sin UnitPrice SAP asigna el costo sin problemas.
 
 
 BUGS

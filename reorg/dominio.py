@@ -130,6 +130,34 @@ class Transformacion:
 
 
 @dataclass
+class EntradaDirecta:
+    """EM directa de un artículo (sin SM): una línea con sus lotes nuevos, en los bins indicados.
+    No lleva UnitPrice: el costo lo asigna SAP."""
+
+    articulo: str
+    bodega: str
+    cantidad: float
+    cuenta: str                    # contrapartida
+    dims: list[str]                # DIM1..DIM5, "" = sin dimensión
+    lotes: list[Lote]              # ordenados, con vencimiento
+    entradas: list[AsignacionBin]  # por lote y bin
+    comentario: str = ""           # Comments ("" = comentario automático)
+
+    @property
+    def clave(self) -> str:
+        return f"{self.bodega}|{self.articulo}"
+
+    def to_dict(self) -> dict:
+        return json.loads(json.dumps(asdict(self)))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EntradaDirecta":
+        return cls(d["articulo"], d["bodega"], d["cantidad"], d["cuenta"], list(d["dims"]),
+                   [Lote(**x) for x in d["lotes"]], [AsignacionBin(**x) for x in d["entradas"]],
+                   d.get("comentario", ""))
+
+
+@dataclass
 class LineaAsiento:
     cuenta: str
     debe: float
@@ -157,6 +185,8 @@ class Gateway(Protocol):
     def guardar_traslado(self, doc: DocTraslado) -> str: ...
     def guardar_sm(self, t: Transformacion) -> str: ...
     def guardar_em(self, t: Transformacion, sm_doc_entry: int, sm_doc_num, costo_unitario: float) -> str: ...
+    def guardar_entrada(self, e: EntradaDirecta) -> str: ...
+    def leer_em(self, doc_entry: int) -> dict: ...
     def enviar(self, tipo: str, archivo: str) -> DocCreado: ...
 
 

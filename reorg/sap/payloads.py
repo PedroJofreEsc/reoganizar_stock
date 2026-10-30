@@ -6,7 +6,7 @@ vista previa de la app.
 
 from __future__ import annotations
 
-from reorg.dominio import AsignacionBin, DocTraslado, Transformacion
+from reorg.dominio import AsignacionBin, DocTraslado, EntradaDirecta, Transformacion
 
 TOL = 1e-6
 
@@ -82,4 +82,19 @@ def entrada_mercancia(t: Transformacion, sm_doc_entry: int, sm_doc_num, costo_un
                                "BaseLineNumber": 0, "ExpiryDate": lt.vencimiento} for lt in t.lotes_destino],
              "DocumentLinesBinAllocations": [_alloc(a, 0, idx) for a in t.entradas_em]}
     return {"Comments": (t.comentario or f"EM desde SM {sm_doc_num}, lotes reales art {t.articulo}")[:254],
+            "DocumentLines": [linea]}
+
+
+# --------------------------------------------------------------------------- #
+# EM directa (InventoryGenEntries sin documento base), una línea, sin UnitPrice
+# --------------------------------------------------------------------------- #
+def entrada_directa(e: EntradaDirecta) -> dict:
+    idx = {lt.lote: j for j, lt in enumerate(e.lotes)}
+    linea = {"ItemCode": e.articulo, "Quantity": num(e.cantidad), "WarehouseCode": e.bodega,
+             **_cuenta_dims(e),
+             "BatchNumbers": [{"BatchNumber": lt.lote, "Quantity": num(lt.cantidad),
+                               "BaseLineNumber": 0, "ExpiryDate": lt.vencimiento} for lt in e.lotes],
+             "DocumentLinesBinAllocations": [_alloc(a, 0, idx) for a in e.entradas]}
+    lotes = ", ".join(lt.lote for lt in e.lotes)
+    return {"Comments": (e.comentario or f"EM directa lotes {lotes} art {e.articulo}")[:254],
             "DocumentLines": [linea]}

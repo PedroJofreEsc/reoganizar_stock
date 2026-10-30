@@ -6,10 +6,11 @@ import io
 
 import pandas as pd
 
-from reorg.procesos import transformacion, traslado
+from reorg.procesos import entrada, transformacion, traslado
 
 _T = traslado.COLUMNAS + traslado.OPCIONALES
 _X = transformacion.COLUMNAS + transformacion.DIMS + transformacion.OPCIONALES
+_E = entrada.COLUMNAS + entrada.DIMS + entrada.OPCIONALES
 _DIMS_EJ = ["1160104", "B2B-ACU", "OPPMMA01", "SAN-SAN", "CHCEQU01", "OPR"]
 
 PLANTILLAS: dict[str, tuple[str, pd.DataFrame]] = {
@@ -43,6 +44,16 @@ PLANTILLAS: dict[str, tuple[str, pd.DataFrame]] = {
             ["110000001", "BDLMP003", "BDLMP003-PISO", "BDLMP003-A02", 45, "L2402", "Redistribución pasillo A"],
             ["110000002", "BDLMP003", "BDLMP003-PISO", "BDLMP003-B01", 24, "L2410", "Redistribución pasillo B"],
         ], columns=_T)),
+    "4_entrada_mercancia": (
+        "EM directa (sin SM): una fila por lote y bin; una EM de una línea por artículo. No se envía costo: "
+        "SAP asigna el precio y la app lo muestra después de crear la EM. CUENTA, DIM1..DIM5 y COMENTARIO "
+        "iguales en todas las filas del artículo.  \n"
+        "**VENCIMIENTO:** fecha de Excel o texto en formato **dd-mm-aaaa** o **aaaa-mm-dd** (también con '/').",
+        pd.DataFrame([
+            ["110000001", "BDLMP003", "L2501", "2027-12-31", 10, "BDLMP003-PISO", *_DIMS_EJ, "Ingreso por ajuste"],
+            ["110000001", "BDLMP003", "L2502", "2028-01-31", 5, "BDLMP003-A01", *_DIMS_EJ, "Ingreso por ajuste"],
+            ["110000002", "BDLMP003", "L2510", "2028-03-31", 8, "BDLMP003-PISO", *_DIMS_EJ, ""],
+        ], columns=_E)),
 }
 
 

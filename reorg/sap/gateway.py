@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from reorg.dominio import DocCreado, DocTraslado, LineaAsiento, Transformacion
+from reorg.dominio import DocCreado, DocTraslado, EntradaDirecta, LineaAsiento, Transformacion
 from reorg.sap import payloads
 from reorg.sap.cliente import Sesion, SLClient
 
@@ -65,6 +65,13 @@ class SapGateway:
         return [LineaAsiento(l.get("AccountCode", ""), float(l.get("Debit") or 0), float(l.get("Credit") or 0))
                 for l in je.get("JournalEntryLines", [])]
 
+    def leer_em(self, doc_entry: int) -> dict:
+        """Precio y totales que SAP asignó a una EM (para ver el costo usado en una EM directa)."""
+        r = self.sl.get(f"InventoryGenEntries({int(doc_entry)})", {"$select": "DocNum,DocTotal,DocumentLines"})
+        l = (r.get("DocumentLines") or [{}])[0]
+        return {"precio": l.get("Price") if l.get("Price") is not None else l.get("UnitPrice"),
+                "total_linea": l.get("LineTotal"), "total_doc": r.get("DocTotal")}
+
     # ---- guardar JSON ----------------------------------------------------- #
     def guardar_traslado(self, doc: DocTraslado) -> str:
         return self._guardar(f"traslado_{doc.id}", payloads.traslado(doc))
@@ -75,6 +82,9 @@ class SapGateway:
     def guardar_em(self, t: Transformacion, sm_doc_entry: int, sm_doc_num, costo_unitario: float) -> str:
         return self._guardar(f"EM_{t.bodega}_{t.articulo}",
                              payloads.entrada_mercancia(t, sm_doc_entry, sm_doc_num, costo_unitario))
+
+    def guardar_entrada(self, e: EntradaDirecta) -> str:
+        return self._guardar(f"EMD_{e.bodega}_{e.articulo}", payloads.entrada_directa(e))
 
     def _guardar(self, nombre: str, payload: dict) -> str:
         if self.carpeta is None:

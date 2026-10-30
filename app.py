@@ -19,8 +19,8 @@ import streamlit as st
 from reorg import plantillas
 from reorg.config import EMPRESAS, PRODUCTIVA, TEST, leer_config
 from reorg.dominio import ErrorSAP, ErrorValidacion, Estado, SesionExpirada
-from reorg.procesos import registro, transformacion, traslado
-from reorg.procesos.registro import CargaTransformacion, CargaTraslado
+from reorg.procesos import entrada, registro, transformacion, traslado
+from reorg.procesos.registro import CargaEntrada, CargaTransformacion, CargaTraslado
 from reorg.sap import cliente, payloads
 from reorg.sap.gateway import SapGateway
 
@@ -29,7 +29,7 @@ CFG = leer_config()
 ss = st.session_state
 ss.setdefault("n_ejecuciones", 0)  # cambia la key de casillas y tablas tras cada ejecución
 ESTADO_APP = ["sesion", "plan_traslado", "res_traslado", "res_nueva_tr", "plan_transf", "res_transf", "res_nueva_tf",
-              "sel_tr", "sel_tf"]
+              "plan_entrada", "res_entrada", "res_nueva_en", "sel_tr", "sel_tf", "sel_en"]
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +78,7 @@ def etiqueta_base(s) -> str:
 def olvidar_resultado_nuevo(carga_id: str):
     """Una acción posterior sobre la carga (reenviar, crear EM, cerrar) deja obsoleto el resultado de su
     primera ejecución: se quita para no mostrar estados viejos."""
-    for k in ("res_nueva_tr", "res_nueva_tf"):
+    for k in ("res_nueva_tr", "res_nueva_tf", "res_nueva_en"):
         if ss.get(k, (None, None))[1] == carga_id:
             ss.pop(k)
 
@@ -653,6 +653,117 @@ def cerrar_transformacion(s, carga: CargaTransformacion):
 
 
 # --------------------------------------------------------------------------- #
+# Pestaña: EM directa
+# --------------------------------------------------------------------------- #
+def tab_entrada():
+    st.subheader("Entrada de mercancía (EM directa)")
+    st.caption("Una EM de una línea por artículo, sin SM de origen. No se envía costo: SAP asigna el precio y la "
+               "app lo muestra después de crear cada EM (columnas PRECIO_SAP y TOTAL_SAP).")
+    s = ss.get("sesion")
+    if not s:
+        st.info("Conéctate a SAP en la barra lateral para validar y ejecutar.")
+        return
+    with st.container(border=True):
+        nueva_carga_entrada(s)
+    with st.container(border=True):
+        cargas_entrada(s)
+
+
+def nueva_carga_entrada(s):
+    st.markdown("### Nueva carga")
+    archivo = st.file_uploader("Excel de EM", type=["xlsx"], key="up_entrada")
+    if not archivo:
+        return
+    fid = huella_archivo(archivo, s.company_db)
+
+    if st.button("Validar y simular", key="val_entrada"):
+        ss.pop("plan_entrada", None)
+        ss.pop("res_nueva_en", None)
+        try:
+            with st.spinner("Validando, resolviendo ubicaciones y revisando lotes y cargas anteriores..."):
+                plan = entrada.preparar(io.BytesIO(archivo.getvalue()), gateway(), s.company_db,
+                                        CFG.dias_minimos_vencimiento)
+            ss.plan_entrada = (fid, plan)
+        except Exception as e:
+            manejar_error(e)
+
+    resultado_nueva_carga("res_nueva_en", fid)
+    if ss.get("plan_entrada", (None,))[0] != fid:
+        return
+    plan: entrada.PlanEntrada = ss.plan_entrada[1]
+    for a in plan.avisos:
+        st.warning(a)
+    st.dataframe(pd.DataFrame([{
+        "Artículo": en.articulo, "Bodega": en.bodega, "Cantidad": en.cantidad,
+        "Lotes": ", ".join(f"{l.lote} ({l.cantidad:g}, vence {l.vencimiento})" for l in en.lotes),
+        "Ubicación": ", ".join(dict.fromkeys(a.bin_code for a in en.entradas)),
+        "Cuenta": en.cuenta, "Comentario": en.comentario or "(automático)"} for en in plan.items]),
+        hide_index=True, width="stretch")
+    with st.expander("Ver JSON que se enviará a SAP"):
+        k = st.selectbox("Artículo", range(len(plan.items)),
+                         format_func=lambda j: f"{plan.items[j].articulo} ({plan.items[j].bodega})", key="json_en")
+        st.caption("Sin UnitPrice: el costo lo asigna SAP.")
+        st.json(payloads.entrada_directa(plan.items[k]))
+
+    n = len(plan.items)
+    if confirmar(f"Confirmo crear {n} EM en {etiqueta_base(s)} (nueva carga)", "conf_em_dir") \
+            and st.button(f"Crear {n} EM", type="primary", key="run_em_dir"):
+        try:
+            carga = CargaEntrada.nueva(s.company_db, s.usuario, archivo.name, archivo.getvalue())
+            filas = ejecutar_con_progreso(
+                lambda p: entrada.crear(plan, carga, gateway(carga.payloads), p), "ARTICULO")
+        except Exception as e:
+            manejar_error(e)
+            return
+        ruta = carga.guardar_log("EM", filas)
+        terminar("res_nueva_en", (fid, carga.id, filas, ruta), "sel_en", carga.id, "plan_entrada")
+
+
+def cargas_entrada(s):
+    st.markdown("### Cargas")
+    if "msg_cierre_en" in ss:
+        st.success(ss.pop("msg_cierre_en"))
+    carga = elegir_carga(CargaEntrada, s, "sel_en", lambda c: c.tiene_pendientes())
+    if not carga:
+        return
+    df = pd.DataFrame([carga.fila_log(k) for k in carga.articulos])
+    st.dataframe(df.drop(columns=["CARGA", "CLAVE"]).astype(str), hide_index=True, width="stretch")
+    avisos_estados(df["ESTADO"])
+
+    pend = carga.pendientes()
+    n_revisar = sum(e["em"]["estado"] == Estado.REVISAR.value for _, e in pend)
+    con_revisar = incluir_revisar(n_revisar, "rev_en")
+    n = len(entrada.enviables(carga, con_revisar))
+    if n and confirmar(f"Confirmo reenviar {n} EM de {carga.id} en {etiqueta_base(s)}", "conf_reenvio_en") \
+            and st.button(f"Reenviar {n} EM (mismo JSON)", type="primary", key="run_reenvio_en"):
+        try:
+            filas = ejecutar_con_progreso(
+                lambda p: entrada.reenviar(carga, gateway(carga.payloads), con_revisar, p), "ARTICULO")
+        except Exception as e:
+            manejar_error(e)
+            return
+        ruta = carga.guardar_log("EM_reenvio", filas)
+        terminar("res_entrada", (carga.id, filas, ruta), "sel_en", carga.id)
+
+    def etiqueta(clave):
+        e = carga.get(clave)
+        return f"{e['datos']['articulo']} ({e['datos']['bodega']}) · {e['em']['estado'] or 'PENDIENTE'}"
+
+    def avisos(elegidos):
+        revisar = any(carga.get(k)["em"]["estado"] == Estado.REVISAR.value for k in elegidos)
+        return [AVISO_REVISAR_CIERRE] if revisar else []
+
+    bloque_cierre(s, carga, entrada.cerrables(carga), etiqueta, avisos,
+                  lambda elegidos, motivo: entrada.cerrar(carga, elegidos, s.usuario, motivo),
+                  "msg_cierre_en", "cierre_en")
+
+    res = ss.get("res_entrada", (None,))
+    if res[0] == carga.id:
+        st.markdown("#### Resultado del último envío")
+        mostrar_resultado(*res[1:])
+
+
+# --------------------------------------------------------------------------- #
 # Pestaña: documentos creados
 # --------------------------------------------------------------------------- #
 COLUMNAS_DOCS = {"FECHA": "Fecha", "TIPO": "Tipo de documento", "DOCNUM": "DocNum", "DOCENTRY": "DocEntry",
@@ -728,14 +839,17 @@ if ss.get("sesion") and ss.sesion.productiva:
              "Los documentos que se ejecuten quedan en producción.")
 st.caption("1 · Consolidar en PISO → 2 · Transformar lotes (SM y luego EM) → 3 · Redistribuir desde PISO. "
            "Validar no crea nada en SAP; solo los botones de crear o reenviar envían documentos.")
-t1, t2, t3, t4 = st.tabs(["Traslado (pasos 1 y 3)", "Transformación (paso 2)", "Documentos creados", "Plantillas"])
+t1, t2, t3, t4, t5 = st.tabs(["Traslado (pasos 1 y 3)", "Transformación (paso 2)", "Entrada de mercancía (EM)",
+                              "Documentos creados", "Plantillas"])
 with t1:
     tab_traslado()
 with t2:
     tab_transformacion()
 with t3:
-    tab_documentos()
+    tab_entrada()
 with t4:
+    tab_documentos()
+with t5:
     tab_plantillas()
 
 # si alguna consulta de esta ejecución detectó la sesión expirada (sin pasar por un botón), pedir reconectar
